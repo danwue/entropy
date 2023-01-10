@@ -1,44 +1,85 @@
 #!/usr/bin/env runhaskell
- 
-import Data.Array (Array, assocs, elems, indices, listArray, (!), (//), array)
-import Data.Function (on)
-import Data.List (inits, maximumBy, minimumBy, tails)
-import Data.Maybe (catMaybes, isJust, isNothing)
-import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
-import Data.Bits (Bits(shiftL, shiftR), (.&.))
 
--- Types --
+import Data.Array.Base (UArray)
+import Data.Array.IArray
+import Data.Bits (Bits (shiftL, shiftR), (.&.))
+import Data.Foldable (maximumBy, minimumBy, Foldable (foldr'))
+import Data.Function (on)
+import Data.Int (Int32, Int8)
+import Data.List (inits, tails, sortOn)
+import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
+
+--- Game Tree ---
+
+data GameTree move state = GameTree state [(move, GameTree move state)]
+
+instance Functor (GameTree move) where
+  fmap f (GameTree state xs) = GameTree (f state) $ mapSnd (fmap f) xs
+
+mapSnd :: (t -> b) -> [(a, t)] -> [(a, b)]
+mapSnd f [] = []
+mapSnd f ((a, b) : xs) = (a, f b) : mapSnd f xs
+
+minimumOn :: Ord a => (c -> a) -> [c] -> c
+minimumOn f = snd . minimumBy (compare `on` fst) . map (\x -> (f x, x))
+
+maximumOn :: Ord a => (c -> a) -> [c] -> c
+maximumOn f = snd . maximumBy (compare `on` fst) . map (\x -> (f x, x))
+
+build :: (state -> [(move, state)]) -> state -> GameTree move state
+build f s = GameTree s $ mapSnd (build f) $ f s
+
+limitDepth :: Int -> GameTree move state -> GameTree move state
+limitDepth 0 (GameTree state children) = GameTree state []
+limitDepth d (GameTree state children) = GameTree state $ mapSnd (limitDepth (d-1)) children
+
+limitStates :: Int -> GameTree move state -> GameTree move state
+limitStates d (GameTree state children) | d <= 0 = GameTree state []
+limitStates d (GameTree state children) = GameTree state $ take d $ mapSnd (limitStates d') children
+  where
+    d' = (d - length children) `div` length children
+
+state (GameTree state _) = state
+
+maximumState :: Ord state => GameTree move state -> state
+maximumState (GameTree state []) = state
+maximumState (GameTree _ children) = maximum $ map (minimumState . snd) children
+
+minimumState :: Ord state => GameTree move state -> state
+minimumState (GameTree state []) = state
+minimumState (GameTree _ children) = minimum $ map (maximumState . snd) children
+
+maximumMove :: Ord state => GameTree move state -> move
+maximumMove (GameTree _ children) = fst $ maximumOn snd $ mapSnd minimumState children
+
+minimumMove :: Ord state => GameTree move state -> move
+minimumMove (GameTree _ children) = fst $ minimumOn snd $ mapSnd maximumState children
+
+--- Entropy Game ---
 
 type Square = (Char, Char)
-data Counter = Blue | Yellow | Red | Green | Pink | Maroon | Black deriving (Enum, Eq, Ord, Show)
-type Board = Array Square (Maybe Counter)
-data Action = Pick Counter | Place Square | Move Square Square deriving (Show)
-data GameState = AwaitingRandom Board | AwaitingChaos Counter Board | AwaitingOrder Board deriving (Show)
+type Counter = Int8
+type Board = UArray Square Counter
+data Move = Pick Counter | Place Counter Square | Move Square Square
+data GameState = AwaitingChaos (Maybe Counter) Board | AwaitingOrder Board deriving (Eq)
 
--- Constants --
+board (AwaitingChaos _ board) = board
+board (AwaitingOrder board) = board
 
-emptyBoard :: Array Square (Maybe Counter)
-emptyBoard = listArray (('A', 'a'), ('G', 'g')) $ repeat Nothing
-
-initialState :: GameState
-initialState = AwaitingRandom emptyBoard
-
--- Functions related to querying and modifying game states --
-
-apply :: GameState -> Action -> GameState
-apply (AwaitingChaos counter board) (Place pos) = AwaitingOrder $ board // [(pos, Just counter)]
-apply (AwaitingOrder board) (Move src dst) = AwaitingRandom $ board // [(src, Nothing), (dst, board ! src)]
-apply (AwaitingRandom board) (Pick color) = AwaitingChaos color board
-apply action state = error "Illegal action for given game state"
+move :: GameState -> Move -> GameState
+move (AwaitingChaos _ board) (Pick counter) = AwaitingChaos (Just counter) board
+move (AwaitingChaos _ board) (Place counter pos) = AwaitingOrder $ board // [(pos, counter)]
+move (AwaitingOrder board) (Move src dst) = AwaitingChaos Nothing $ board // [(src, 0), (dst, board ! src)]
+move action state = error "Illegal action for given game state"
 
 remainingCounters :: Counter -> Board -> Int
-remainingCounters counter = (7 -) . length . filter (== counter) . catMaybes . elems
+remainingCounters counter = (7 -) . length . filter (== counter) . elems
 
 emptySquares :: Board -> [Square]
-emptySquares = map fst . filter (isNothing . snd) . assocs
+emptySquares = map fst . filter ((== 0) . snd) . assocs
 
 occupiedSquares :: Board -> [Square]
-occupiedSquares = map fst . filter (isJust . snd) . assocs
+occupiedSquares = map fst . filter ((/= 0) . snd) . assocs
 
 leftOf :: Square -> [Square]
 leftOf (r, c) = reverse [(r, c') | c' <- ['a' .. pred c]]
@@ -53,29 +94,29 @@ downOf :: Square -> [Square]
 downOf (r, c) = [(r', c) | r' <- [succ r .. 'G']]
 
 validMoves :: Square -> Board -> [Square]
-validMoves sq board | isNothing $ board ! sq = []
-validMoves sq board = concatMap (takeWhile (\sq' -> isNothing $ board ! sq')) [leftOf sq, rightOf sq, upOf sq, downOf sq]
+validMoves sq board | board ! sq == 0 = []
+validMoves sq board = concatMap (takeWhile (\sq' -> board ! sq' == 0)) [leftOf sq, rightOf sq, upOf sq, downOf sq]
 
-skipMove :: Board -> Action
+skipMove :: Board -> Move
 skipMove board = Move occupiedSquare occupiedSquare
   where
     occupiedSquare = head . occupiedSquares $ board
 
-actions :: GameState -> [Action]
-actions (AwaitingRandom board) = [Pick counter | counter <- [Blue .. Black], remainingCounters counter board > 0]
-actions (AwaitingChaos counter board) = map Place $ emptySquares board
-actions (AwaitingOrder board) = skipMove board : [Move src dst | src <- indices board, dst <- validMoves src board]
+moves :: GameState -> [Move]
+moves (AwaitingChaos (Just counter) board) = map (Place counter) $ emptySquares board
+moves (AwaitingChaos Nothing board) = concat [moves $ AwaitingChaos (Just counter) board | counter <- [1 .. 7], remainingCounters counter board > 0]
+moves (AwaitingOrder board) = skipMove board : [Move src dst | src <- indices board, dst <- validMoves src board]
 
-board :: GameState -> Board
-board (AwaitingRandom board) = board
-board (AwaitingChaos _ board) = board
-board (AwaitingOrder board) = board
+-- Heuristic --
 
-rows :: Board -> [[Maybe Counter]]
-rows board = [[board ! (r, c) | c <- ['a'..'g']] | r <- ['A'..'G']]
+-- instance Ord GameState where
+--   s1 `compare` s2 = (heuristic . board) s1 `compare` (heuristic . board) s2
 
-cols :: Board -> [[Maybe Counter]]
-cols board = [[board ! (r, c) | r <- ['A'..'G']] | c <- ['a'..'g']]
+rows :: Board -> [[Counter]]
+rows board = [[board ! (r, c) | c <- ['a' .. 'g']] | r <- ['A' .. 'G']]
+
+cols :: Board -> [[Counter]]
+cols board = [[board ! (r, c) | r <- ['A' .. 'G']] | c <- ['a' .. 'g']]
 
 continuousSubSeqs :: [a] -> [[a]]
 continuousSubSeqs xs = [ts | is <- inits xs, ts <- tails is]
@@ -86,64 +127,47 @@ isPalindrome xs = xs == reverse xs
 patternScore :: Eq a => [a] -> Int
 patternScore xs = sum $ filter (> 1) $ map length $ filter isPalindrome (continuousSubSeqs xs)
 
--- Main implementation of the algorithm --
-
-minimumOn :: Ord a => (c -> a) -> [c] -> c
-minimumOn f = snd . minimumBy (compare `on` fst) . map (\x -> (f x, x))
-
-maximumOn :: Ord a => (c -> a) -> [c] -> c
-maximumOn f = snd . maximumBy (compare `on` fst) . map (\x -> (f x, x))
-
-makeTurn :: GameState -> Action
-makeTurn gs@(AwaitingChaos _ _) = minimumOn (score 2 . apply gs) $ actions gs
-makeTurn gs@(AwaitingOrder _) = maximumOn (score 1 . apply gs) $ actions gs
-makeTurn _ = error "Illegal state"
-
-score :: Int -> GameState -> Int
-score 0 gs = heuristic . board $ gs
-score d gs | null . emptySquares . board $ gs = heuristic . board $ gs
-score d gs@(AwaitingRandom board) = sum [remainingCounters counter board * score (d -1) (apply gs a) | a@(Pick counter) <- actions gs] `div` (length . emptySquares $ board)
-score d gs@(AwaitingChaos _ _) = minimum . map (score (d -1) . apply gs) $ actions gs
-score d gs@(AwaitingOrder _) = maximum . map (score (d -1) . apply gs) $ actions gs
-
 heuristic :: Board -> Int
 heuristic board = sum . map ((patternCache !) . patternToInt) $ rows board ++ cols board
 
 -- Hackish cache to avoid recalculating scores --
 
-encodeCounter :: Maybe Counter -> Int
-encodeCounter Nothing = 7
-encodeCounter (Just counter) = fromEnum counter
+patternToInt :: [Counter] -> Int32
+patternToInt = foldr (\e n -> (n `shiftL` 3) + fromIntegral e) 0
 
-decodeCounter :: Int -> Maybe Counter
-decodeCounter 7 = Nothing
-decodeCounter n = Just $ toEnum n
+intToPattern :: Int32 -> [Counter]
+intToPattern = take 7 . map (fromIntegral . (.&. 7)) . iterate (`shiftR` 3)
 
-patternToInt :: [Maybe Counter] -> Int
-patternToInt = foldr (\e n -> (n `shiftL` 3) + encodeCounter e) 0
+patternCache :: Array Int32 Int
+patternCache = array (0, patternToInt $ replicate 7 7) [(key, patternScore $ intToPattern key) | key <- [0 .. (patternToInt $ replicate 7 7)]]
 
-intToPattern :: Int -> [Maybe Counter]
-intToPattern = take 7 . map (decodeCounter . (.&. 7)) . iterate (`shiftR` 3)
+-- Choosing turn --
 
-patternCache :: Array Int Int
-patternCache = array (0,patternToInt $ replicate 7 Nothing) [ (key, patternScore $ intToPattern key) | key <- [0..(patternToInt $ replicate 7 Nothing)]]
+entropyTree :: GameState -> GameTree Move GameState
+entropyTree = build f
+  where
+    f gs = [(m, move gs m) | m <- moves gs]
 
--- Communication protocol and all IO stuff --
+makeTurn :: GameState -> Move
+makeTurn gs@(AwaitingChaos _ _) = minimumMove $ fmap (heuristic.board) $ limitStates 200000 $ entropyTree gs
+makeTurn gs@(AwaitingOrder _) = maximumMove $ fmap (heuristic.board) $ limitStates 200000 $ entropyTree gs
+
+-- All IO stuff --
 
 parseCounter :: String -> Counter
-parseCounter = toEnum . (+ (-1)) . read
+parseCounter = read
 
 parseSq :: String -> Square
-parseSq [r, c] = (r,c)
+parseSq [r, c] = (r, c)
 parseSq s = error $ "Illegal square identifier: " ++ s
 
 printSq :: Square -> String
-printSq (r, c) = [r,c]
+printSq (r, c) = [r, c]
 
 main :: IO ()
 main = do
   hSetBuffering stdout LineBuffering
-  receiveInput initialState
+  receiveInput $ AwaitingChaos Nothing $ listArray (('A', 'a'), ('G', 'g')) $ repeat 0
 
 receiveInput :: GameState -> IO ()
 receiveInput gs = do
@@ -154,17 +178,16 @@ handleInput :: String -> GameState -> IO ()
 handleInput "Start" gs = receiveInput gs
 handleInput "Quit" gs = return ()
 handleInput [counter] gs = do
-  let gs' = apply gs (Pick (parseCounter [counter]))
-  let a@(Place sq) = makeTurn gs'
+  let gs' = move gs (Pick (parseCounter [counter]))
+  let a@(Place counter sq) = makeTurn gs'
   putStrLn . printSq $ sq
-  receiveInput $ apply gs' a
+  receiveInput $ move gs' a
 handleInput [counter, row, col] gs = do
-  let gs' = apply gs (Pick (parseCounter [counter]))
-  let gs'' = apply gs' (Place (parseSq [row, col]))
-  let a@(Move src dst) = makeTurn gs''
+  let gs' = move gs (Place (parseCounter [counter]) (parseSq [row, col]))
+  let a@(Move src dst) = makeTurn gs'
   putStrLn . concatMap printSq $ [src, dst]
-  receiveInput $ apply gs'' a
+  receiveInput $ move gs' a
 handleInput [srcRow, srcCol, dstRow, dstCol] gs = do
-  let gs' = apply gs (Move (parseSq [srcRow, srcCol]) (parseSq [dstRow, dstCol]))
+  let gs' = move gs (Move (parseSq [srcRow, srcCol]) (parseSq [dstRow, dstCol]))
   receiveInput gs'
 handleInput cmd board = errorWithoutStackTrace $ "Illegal command: " ++ cmd
