@@ -1,27 +1,24 @@
 #!/usr/bin/env runhaskell
-
-import Data.Array (Array, assocs, elems, indices, listArray, (!), (//))
+ 
+import Data.Array (Array, assocs, elems, indices, listArray, (!), (//), array)
 import Data.Function (on)
-import Data.Ix (index)
 import Data.List (inits, maximumBy, minimumBy, tails)
 import Data.Maybe (catMaybes, isJust, isNothing)
 import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
+import Data.Bits (Bits(shiftL, shiftR), (.&.))
 
 -- Types --
 
-type Square = (Int, Int)
-data Counter = Blue | Yellow | Red | Green | Pink | Maroon | Black deriving (Enum, Eq, Ord)
+type Square = (Char, Char)
+data Counter = Blue | Yellow | Red | Green | Pink | Maroon | Black deriving (Enum, Eq, Ord, Show)
 type Board = Array Square (Maybe Counter)
-data Action = Pick Counter | Place Square | Move Square Square
-data GameState = AwaitingRandom Board | AwaitingChaos Counter Board | AwaitingOrder Board
+data Action = Pick Counter | Place Square | Move Square Square deriving (Show)
+data GameState = AwaitingRandom Board | AwaitingChaos Counter Board | AwaitingOrder Board deriving (Show)
 
 -- Constants --
 
-boardDimension :: Int
-boardDimension = 7
-
 emptyBoard :: Array Square (Maybe Counter)
-emptyBoard = listArray ((1, 1), (boardDimension, boardDimension)) $ replicate (boardDimension * boardDimension) Nothing
+emptyBoard = listArray (('A', 'a'), ('G', 'g')) $ repeat Nothing
 
 initialState :: GameState
 initialState = AwaitingRandom emptyBoard
@@ -35,7 +32,7 @@ apply (AwaitingRandom board) (Pick color) = AwaitingChaos color board
 apply action state = error "Illegal action for given game state"
 
 remainingCounters :: Counter -> Board -> Int
-remainingCounters counter = (boardDimension -) . length . filter (== counter) . catMaybes . elems
+remainingCounters counter = (7 -) . length . filter (== counter) . catMaybes . elems
 
 emptySquares :: Board -> [Square]
 emptySquares = map fst . filter (isNothing . snd) . assocs
@@ -44,16 +41,16 @@ occupiedSquares :: Board -> [Square]
 occupiedSquares = map fst . filter (isJust . snd) . assocs
 
 leftOf :: Square -> [Square]
-leftOf (r, c) = reverse [(r, c) | c' <- [1 .. c -1]]
+leftOf (r, c) = reverse [(r, c') | c' <- ['a' .. pred c]]
 
 rightOf :: Square -> [Square]
-rightOf (r, c) = [(r, c) | c' <- [c + 1 .. boardDimension]]
+rightOf (r, c) = [(r, c') | c' <- [succ c .. 'g']]
 
 upOf :: Square -> [Square]
-upOf (r, c) = reverse [(r, c) | r' <- [1 .. r -1]]
+upOf (r, c) = reverse [(r', c) | r' <- ['A' .. pred r]]
 
 downOf :: Square -> [Square]
-downOf (r, c) = [(r, c) | r' <- [r + 1 .. boardDimension]]
+downOf (r, c) = [(r', c) | r' <- [succ r .. 'G']]
 
 validMoves :: Square -> Board -> [Square]
 validMoves sq board | isNothing $ board ! sq = []
@@ -75,10 +72,10 @@ board (AwaitingChaos _ board) = board
 board (AwaitingOrder board) = board
 
 rows :: Board -> [[Maybe Counter]]
-rows board = [[board ! (r, c) | c <- [1 .. boardDimension]] | r <- [1 .. boardDimension]]
+rows board = [[board ! (r, c) | c <- ['a'..'g']] | r <- ['A'..'G']]
 
 cols :: Board -> [[Maybe Counter]]
-cols board = [[board ! (r, c) | r <- [1 .. boardDimension]] | c <- [1 .. boardDimension]]
+cols board = [[board ! (r, c) | r <- ['A'..'G']] | c <- ['a'..'g']]
 
 continuousSubSeqs :: [a] -> [[a]]
 continuousSubSeqs xs = [ts | is <- inits xs, ts <- tails is]
@@ -98,8 +95,8 @@ maximumOn :: Ord a => (c -> a) -> [c] -> c
 maximumOn f = snd . maximumBy (compare `on` fst) . map (\x -> (f x, x))
 
 makeTurn :: GameState -> Action
-makeTurn gs@(AwaitingChaos _ _) = minimumOn (score 4 . apply gs) $ actions gs
-makeTurn gs@(AwaitingOrder _) = maximumOn (score 4 . apply gs) $ actions gs
+makeTurn gs@(AwaitingChaos _ _) = minimumOn (score 2 . apply gs) $ actions gs
+makeTurn gs@(AwaitingOrder _) = maximumOn (score 1 . apply gs) $ actions gs
 makeTurn _ = error "Illegal state"
 
 score :: Int -> GameState -> Int
@@ -110,23 +107,38 @@ score d gs@(AwaitingChaos _ _) = minimum . map (score (d -1) . apply gs) $ actio
 score d gs@(AwaitingOrder _) = maximum . map (score (d -1) . apply gs) $ actions gs
 
 heuristic :: Board -> Int
-heuristic board = sum . map patternScore $ rows board ++ cols board
+heuristic board = sum . map ((patternCache !) . patternToInt) $ rows board ++ cols board
+
+-- Hackish cache to avoid recalculating scores --
+
+encodeCounter :: Maybe Counter -> Int
+encodeCounter Nothing = 7
+encodeCounter (Just counter) = fromEnum counter
+
+decodeCounter :: Int -> Maybe Counter
+decodeCounter 7 = Nothing
+decodeCounter n = Just $ toEnum n
+
+patternToInt :: [Maybe Counter] -> Int
+patternToInt = foldr (\e n -> (n `shiftL` 3) + encodeCounter e) 0
+
+intToPattern :: Int -> [Maybe Counter]
+intToPattern = take 7 . map (decodeCounter . (.&. 7)) . iterate (`shiftR` 3)
+
+patternCache :: Array Int Int
+patternCache = array (0,patternToInt $ replicate 7 Nothing) [ (key, patternScore $ intToPattern key) | key <- [0..(patternToInt $ replicate 7 Nothing)]]
 
 -- Communication protocol and all IO stuff --
-
-class Protocol a where
-  parse :: String -> [a]
-  print :: a -> String
 
 parseCounter :: String -> Counter
 parseCounter = toEnum . (+ (-1)) . read
 
 parseSq :: String -> Square
-parseSq [r, c] = (index ('A', 'Z') r + 1, index ('a', 'z') c + 1)
+parseSq [r, c] = (r,c)
 parseSq s = error $ "Illegal square identifier: " ++ s
 
 printSq :: Square -> String
-printSq (r, c) = [['A' .. 'Z'] !! (r -1), ['a' .. 'z'] !! (c -1)]
+printSq (r, c) = [r,c]
 
 main :: IO ()
 main = do
