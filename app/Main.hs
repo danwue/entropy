@@ -109,6 +109,9 @@ initialModel = GameInfo{side = None,
  score=0
  }
 
+counter:: GameState -> Maybe Counter
+counter  (AwaitingChaos counter board)=  Just counter
+counter _ = Nothing
 
 getBoard:: GameInfo -> Board
 getBoard  GameInfo{gs=gs} = Entropy.board(gs)
@@ -150,7 +153,6 @@ updateModel (PlaceCounter a b) state@GameInfo{..} =
     (AwaitingRandom _)  -> noEff state
     (AwaitingChaos counter board) -> noEff state{gs= AwaitingOrder $ board // [(intsToSquare (a, b), counter)]}
     (AwaitingOrder _) -> let (new, ctr) = generateCounter state in  new{side = Order, gameProgress=InProgress, gs = AwaitingChaos  ctr (board gs)} <# do liftIO (print new) >> pure NoOp
-    _  ->  noEff state
 updateModel _ m =  noEff m
 
 
@@ -229,13 +231,10 @@ displayHeading model@GameInfo {..} =
         [class_ "scores-container"]
         [ div_
             [class_ "score-container"]
-            case gameProgress of
-                Starting -> [button_[onClick $ PickSide Chaos][text "Pick Chaos"], button_[onClick $ PickSide Order][text "Pick Order"]]
-                InProgress -> [text $ S.ms score]
-        ], displayCounter gs
+            [scoreDisplay, chooseSide, counterDisplay]
+        ]
     ]
-
-displayCounter:: GameState -> View Action
-displayCounter gs  =  Prelude.maybe (div_[][]) (\x->(div_[][text $ S.ms (show x)])) (counter gs)
-
-
+    where  
+      chooseSide = if gameProgress == Starting then div_[][button_[onClick $ PickSide Chaos][text "Pick Chaos"], button_[onClick $ PickSide Order][text "Pick Order"]] else text ""
+      scoreDisplay = if gameProgress == InProgress then text $ S.ms $ show score else text ""
+      counterDisplay = Prelude.maybe (div_[][]) (\x->(div_[][text $ S.ms (show x)])) (counter gs)
