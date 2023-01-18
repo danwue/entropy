@@ -59,7 +59,6 @@ data Action
   | PickSide Side
   | NoOp
   | Print
-  | Move { color:: Int, loc::(Int, Int)}
   | SayHelloWorld
   deriving (Eq, Show)
 
@@ -186,12 +185,12 @@ displayGame model@GameInfo {..}  =
   div_
     [style_ $ "position" =: "relative" <> "padding" =: S.ms(show grid_spacing ++"px")]
     [displayContainer
-    , displayTileContainer  gs
+    , displayTileContainer  model
     ]
 
 
-displayTileContainer :: GameState -> View Action
-displayTileContainer gs =
+displayTileContainer :: GameInfo -> View Action
+displayTileContainer model@GameInfo{..} =
   div_
     [style_ $ "position" =: "absolute"<>
               "z-index" =: "2"<>
@@ -200,26 +199,48 @@ displayTileContainer gs =
               "flex-wrap" =: "wrap"
 
     ]
-    (concatMap displayTile (tilesWithCoordinates (board gs)))
+    (concatMap (displayTile side)  (tilesWithCoordinates (board gs)))
 
 
+color :: Counter -> S.MisoString
+color 1 = "#ffff00"
+color 2 = "#ff00ff"
+color 3 =  "#00ffff"
+color 4 =   "#ff0000"
+color 5 =  "#0000ff"
+color 6 =  "#00ff00"
+color 7 =  "#000000"
+color _ ="#ffffff"
 
-
-displayTile :: (Counter, Int, Int) -> [View Action]
-displayTile (tile, a,b) =
+displayTile :: Side -> (Counter, Int, Int) -> [View Action]
+displayTile side (tile, a,b) =
   [ div_
-      []
-      [button_ [style_ $
+      [style_ $
           "width"=: S.ms(show tile_size ++"px")<>
           "height"=:S.ms(show tile_size ++"px")<>
           "line-height"=: S.ms(show tile_size ++"px")<>
           "margin-left"=:"10px"<>
-          "margin-top"=:"5px",
-          onClick $ PlaceCounter a b
-        ]
-        [text  (S.ms $show tile)]
+          "margin-top"=:"5px"
+      ] button
+  ] where 
+
+    action = PlaceCounter
+    button = [button_ 
+                [
+                  style_ $
+                    "width"=: S.ms(show tile_size ++"px")<>
+                    "height"=:S.ms(show tile_size ++"px")<>
+                    "border-radius" =: "50%"<>
+                    "line-height"=: S.ms(show tile_size ++"px")<>
+                    "margin-left"=: S.ms (show "10px")<>
+                    "margin-top"=:S.ms ( show "5px")<>
+                    "background-color"=: color tile,
+                    onClick $ PlaceCounter a b
+                ]
+                [text  (S.ms $ show tile)]
       ]
-  ]
+    
+
 
 
 displayHeading :: GameInfo -> View Action
