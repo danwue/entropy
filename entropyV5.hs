@@ -14,12 +14,11 @@ import Data.Int (Int16, Int32, Int64, Int8)
 import Data.List (dropWhileEnd, group, inits, intersperse, partition, sort, sortOn, tails, transpose)
 import Data.Map (Map, findWithDefault, fromListWith, toList)
 import qualified Data.Map as Map
-import Data.Maybe (catMaybes, fromJust, isJust, mapMaybe)
+import Data.Maybe (catMaybes, fromJust, fromMaybe, isJust, mapMaybe)
 import Data.Ord (Down (Down))
 import Data.Word (Word32, Word8)
 import Debug.Trace (trace, traceShow)
 import System.IO (BufferMode (LineBuffering), hPutStrLn, hSetBuffering, stderr, stdout)
-import Text.XHtml (cols)
 
 --- Game Tree ---
 
@@ -105,9 +104,13 @@ moves' = f . partition'
     f (t : ts, s : ss) = (s, t) : f (ts, s : ss)
 
 type Square = (Index, Index)
+
 type Board = UArray (LineType, Index) Line
-type Score = Int16
+
+type Score = Float
+
 data Move = Pick Counter | Place Square | Move Square Square deriving (Show)
+
 data GameState = AwaitingChaos Counter Board | AwaitingRandom Board | AwaitingOrder Board deriving (Eq, Show)
 
 board :: GameState -> Board
@@ -118,11 +121,11 @@ board (AwaitingRandom board) = board
 move :: GameState -> Move -> GameState
 move (AwaitingRandom b) (Pick counter) = AwaitingChaos counter b
 move (AwaitingChaos counter b) (Place (row, col)) = AwaitingOrder $ b // [((Row, row), add counter col (b ! (Row, row))), ((Col, col), add counter row (b ! (Col, col)))]
-move (AwaitingOrder b) (Move src@(srcRow, srcCol) dst@(dstRow, dstCol))
+move (AwaitingOrder b) a@(Move src@(srcRow, srcCol) dst@(dstRow, dstCol))
   | src == dst = AwaitingRandom b
   | srcRow == dstRow = AwaitingRandom $ b // [((Row, srcRow), (remove srcCol . add c dstCol) (b ! (Row, srcRow))), ((Col, srcCol), remove srcRow (b ! (Col, srcCol))), ((Col, dstCol), add c dstRow (b ! (Col, dstCol)))]
   | srcCol == dstCol = AwaitingRandom $ b // [((Col, srcCol), (remove srcRow . add c dstRow) (b ! (Col, srcCol))), ((Row, srcRow), remove srcCol (b ! (Row, srcRow))), ((Row, dstRow), add c dstCol (b ! (Row, dstRow)))]
-  | otherwise = error ""
+  | otherwise = error $ "Illegal move action:" ++ show a
   where
     Just c = get srcCol $ b ! (Row, srcRow)
 move state action = error $ "Illegal action for given game state: " ++ show action
@@ -141,7 +144,9 @@ skipMove board = Move occupiedSquare occupiedSquare
 moves :: GameState -> [Move]
 moves (AwaitingChaos counter b) = map Place $ emptySquares b
 moves (AwaitingRandom b) = [Pick c | c <- [Blue .. Black]]
-moves (AwaitingOrder b) = skipMove b : (rows ++ cols)
+moves (AwaitingOrder b)
+  | null rows && null cols = [] -- game over
+  | otherwise = rows ++ cols ++ [skipMove b]
   where
     rows = [Move (r, srcCol) (r, dstCol) | r <- [A .. G], (srcCol, dstCol) <- moves' (b ! (Row, r))]
     cols = [Move (srcRow, c) (dstRow, c) | c <- [A .. G], (srcRow, dstRow) <- moves' (b ! (Col, c))]
@@ -154,18 +159,6 @@ continuousSubSeqs xs = [ts | is <- inits xs, ts <- tails is]
 isPalindrome :: Eq a => [a] -> Bool
 isPalindrome xs = xs == reverse xs
 
-lineScore :: [Maybe Counter] -> Score
-lineScore xs = sum $ map score $ filter isPalindrome (continuousSubSeqs xs)
-  where
-    score [_] = 0 -- single counters do not give any score
-    score (Nothing : xs) = 0 -- ignore palindromes which start and end with empty squares
-    score [_, Nothing, _] = 3 -- missing center pieces will always end up contributing to the score
-    score [_, _, Nothing, _, _] = fromIntegral . (+ 1) . length . filter isJust $ xs
-    score [_, _, _, Nothing, _, _, _] = fromIntegral . (+ 1) . length . filter isJust $ xs
-    score xs = fromIntegral . length . filter isJust $ xs -- just count all the counters on the squares
-
--- Hackish cache to avoid recalculating scores --
-
 -- each square can be in 8 different states (empty, or containing counter 1-7)
 -- thus, we can encode a row/column into an integer to have a compact lookup key.
 -- in total, we have an integer with maximum value of 2^21-1 (7 squares * 3 bits/square = 21 bits)
@@ -176,68 +169,58 @@ intToLine i = (d . (.&. 0b111)) i : intToLine (i `shiftR` 3)
     d 0 = Nothing
     d i = Just $ toEnum . fromIntegral $ i -1
 
--- values (unlike functions) are cached in Haskell. We can exploit this and use a simple array as lazy initialized cache
-patternCache :: UArray Line Score
-patternCache = array (0, 0b111111111111111111111) [(key, lineScore $ intToLine key) | key <- [0 .. 0b111111111111111111111]]
-
-patternCache' :: Line -> Score
-patternCache' i = patternCache ! i
-
--- Choosing turn --
+-- Values (unlike functions) are cached in Haskell. We can exploit this and use a simple array as lazy initialized cache.
+lineScore :: UArray Line Score
+lineScore = array (0, 0b111111111111111111111) [(key, lineScore $ intToLine key) | key <- [0 .. 0b111111111111111111111]]
+  where
+    lineScore :: [Maybe Counter] -> Score
+    lineScore xs = sum . map score . filter isPalindrome $ continuousSubSeqs xs
+      where
+        -- non-patterns
+        score (Nothing : xs) = 0
+        -- odd patterns
+        score [a, Nothing, b] = 1 + score [a, b]
+        score [a, b, Nothing, c, d] = 1 + score [a, b, c, d]
+        score [a, b, c, Nothing, d, e, f] = 1 + score [a, b, c, d, e, f]
+        -- even patterns
+        score p = fromIntegral . length . filter isJust $ p
 
 score :: GameState -> Score
-score = sum . elems . amap patternCache' . board
+score = sum . elems . amap (lineScore !) . board
 
--- From Wikipedia:
--- function alphabeta(node, depth, α, β, maximizingPlayer) is
---     if depth = 0 or node is a terminal node then
---         return the heuristic value of node
---     if maximizingPlayer then
---         value := −∞
---         for each child of node do
---             value := max(value, alphabeta(child, depth − 1, α, β, FALSE))
---             α := max(α, value)
---             if value ≥ β then
---                 break (* β cutoff *)
---         return value
---     else
---         value := +∞
---         for each child of node do
---             value := min(value, alphabeta(child, depth − 1, α, β, TRUE))
---             β := min(β, value)
---             if value ≤ α then
---                 break (* α cutoff *)
---         return value
-
-alphaBeta' :: Score -> Score -> GameTree Move GameState -> Score
-alphaBeta' _ _ (GameTree s []) = score s
-alphaBeta' a b (GameTree (AwaitingOrder _) cs) = fst . last . takeWhile ((< b) . fst) $ scanl (\(v, a) s -> (max v (alphaBeta' a b s), max a $ alphaBeta' a b s)) (minBound, a) $ map snd cs
-alphaBeta' a b (GameTree (AwaitingChaos _ _) cs) = fst . last . takeWhile ((> a) . fst) $ scanl (\(v, b) s -> (min v (alphaBeta' a b s), min b $ alphaBeta' a b s)) (maxBound, b) $ map snd cs
-alphaBeta' a b (GameTree (AwaitingRandom board) cs) = (`div` fromIntegral emptyFields) . sum $ [alphaBeta' a b gt * fromIntegral (findWithDefault 7 c counts) | (m@(Pick c), gt) <- cs, findWithDefault 7 c counts > 0]
-  where
-    emptyFields = 49 - length placedCounters
-    counts = Map.map (7 -) . fromListWith (+) . map (,1) $ placedCounters
-    placedCounters = catMaybes $ concatMap intToLine [board ! (Row, r) | r <- [A .. G]]
-
+-- alpha: maximum points order can force
+-- beta: minimum points beta can force
 alphaBeta :: GameTree Move GameState -> Move
-alphaBeta (GameTree (AwaitingOrder _) cs) = fst $ maximumOn (alphaBeta' minBound maxBound . snd) cs
-alphaBeta (GameTree (AwaitingChaos _ _) cs) = fst $ minimumOn (alphaBeta' minBound maxBound . snd) cs
-alphaBeta _ = error ""
-
-expectMinMax' :: GameTree Move GameState -> Score
-expectMinMax' (GameTree s []) = score s
-expectMinMax' (GameTree (AwaitingOrder _) cs) = maximum $ map (expectMinMax' . snd) cs
-expectMinMax' (GameTree (AwaitingChaos _ _) cs) = minimum $ map (expectMinMax' . snd) cs
-expectMinMax' (GameTree (AwaitingRandom board) cs) = (`div` fromIntegral emptyFields) . sum $ [(* fromIntegral (findWithDefault 7 c counts)) $ expectMinMax' gt | (m@(Pick c), gt) <- cs, findWithDefault 7 c counts > 0]
+alphaBeta gt = traceShow s m
   where
-    emptyFields = 49 - length placedCounters
-    counts = Map.map (7 -) . fromListWith (+) . map (,1) $ placedCounters
-    placedCounters = catMaybes $ concatMap intToLine [board ! (Row, r) | r <- [A .. G]]
-
-expectMinMax :: GameTree Move GameState -> Move
-expectMinMax (GameTree (AwaitingOrder _) cs) = fst $ maximumOn (expectMinMax' . snd) cs
-expectMinMax (GameTree (AwaitingChaos _ _) cs) = fst $ minimumOn (expectMinMax' . snd) cs
-expectMinMax _ = error ""
+    posInf = 1.0 / 0
+    negInf = -1.0 / 0
+    (Just m, s) = alphaBeta' negInf posInf gt
+    alphaBeta' :: Score -> Score -> GameTree Move GameState -> (Maybe Move, Score)
+    alphaBeta' _ _ (GameTree s []) = (Nothing, score s)
+    alphaBeta' a b (GameTree (AwaitingOrder _) cs) = acc (Nothing, negInf) a cs
+      where
+        acc (m, v) a [] = (m, v)
+        acc (m, v) a _ | v >= b = (m, v) -- cutoff
+        acc (m, v) a ((m', s) : xs)
+          | v < v' = acc (Just m', v') (max a v') xs
+          | otherwise = acc (m, v) a xs
+          where
+            v' = snd (alphaBeta' a b s)
+    alphaBeta' a b (GameTree (AwaitingChaos _ _) cs) = acc (Nothing, posInf) b cs
+      where
+        acc (m, v) b [] = (m, v)
+        acc (m, v) b _ | v <= a = (m, v) -- cutoff
+        acc (m, v) b ((m', s) : xs)
+          | v > v' = acc (Just m', v') (min b v') xs
+          | otherwise = acc (m, v) b xs
+          where
+            v' = snd (alphaBeta' a b s)
+    alphaBeta' a b (GameTree (AwaitingRandom board) cs) = (Nothing,) . (/ fromIntegral emptyFields) . sum $ [snd (alphaBeta' a b gt) * fromIntegral (findWithDefault 7 c counts) | (m@(Pick c), gt) <- cs, findWithDefault 7 c counts > 0]
+      where
+        emptyFields = 49 - length placedCounters
+        counts = Map.map (7 -) . fromListWith (+) . map (,1) $ placedCounters
+        placedCounters = catMaybes $ concatMap intToLine [board ! (Row, r) | r <- [A .. G]]
 
 entropyTree :: GameState -> GameTree Move GameState
 entropyTree gs = build f gs
