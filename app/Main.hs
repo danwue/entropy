@@ -199,7 +199,7 @@ isLegalMove (AwaitingOrder board) (Move a b) = Prelude.or [a==b, b `elem` validM
 -- | Constructs a virtual DOM from a model
 viewModel :: GameInfo -> View Action
 viewModel model =  div_
-    [ style_ $ "width"=: "50%"<>"margin" =: "auto"]
+    [ style_ $ "width"=: "50%"<>"margin" =: "auto"<>"min-width"=:"500px"]
     [ displayHeading model,  displayGame model]
 
 displayGame :: GameInfo -> View Action
@@ -248,8 +248,10 @@ displayTile :: Side -> OrderCounter -> (Counter, Int, Int) -> [View Action]
 displayTile side oc (tile, a,b) =
   [ div_
       [style_ $
-          "width"=: S.ms(show tile_size ++"px")<>
-          "height"=:S.ms(show tile_size ++"px")<>
+          "max-width"=: S.ms(show tile_size ++"px")<>
+            "max-height"=:S.ms(show tile_size ++"px")<>
+            "width"=: S.ms((show 11) ++"vw")<>
+            "height"=:S.ms((show 11) ++"vw")<>
           "line-height"=: S.ms(show tile_size ++"px")<>
           "border-style" =:"solid"
       ] button
@@ -266,8 +268,10 @@ displayTile side oc (tile, a,b) =
     button = [button_
                 [
                   style_ $
-                    "width"=: S.ms(show tile_size ++"px")<>
-                    "height"=:S.ms(show tile_size ++"px")<>
+                    "max-width"=: S.ms(show tile_size ++"px")<>
+                    "max-height"=:S.ms(show tile_size ++"px")<>
+                    "width"=: S.ms((show 11) ++"vw")<>
+                    "height"=:S.ms((show 11) ++"vw")<>
                     "border-radius" =: radius tile<>
                     "line-height"=: S.ms(show tile_size ++"px")<>
                     "background-color"=: color tile,
@@ -310,8 +314,10 @@ displayHeading model@GameInfo {..} =
       ctr= case counter gs of
         Nothing  -> div_[style_ $ "display"=:"inline-block"][text "-"]
         (Just x) ->  div_[style_ $
-                      "width"=: S.ms(show tile_size ++"px")<>
-                      "height"=:S.ms(show tile_size ++"px")<>
+                      "max-width"=: S.ms(show tile_size ++"px")<>
+                      "max-height"=:S.ms(show tile_size ++"px")<>
+                      "width"=: S.ms((show 11) ++"vw")<>
+                      "height"=:S.ms((show 11) ++"vw")<>
                       "border-radius" =: radius x<>
                       "line-height"=: S.ms(show tile_size ++"px")<>
                       "background-color"=: color x <>
