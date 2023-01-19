@@ -63,19 +63,18 @@ type Square = (Char, Char)
 type Counter = Int8
 type Board = UArray Square Counter
 data Move = Pick Counter | Place Counter Square | Move Square Square deriving (Show)
-data GameState = AwaitingChaos Counter Board | AwaitingRandom Board | AwaitingOrder Board deriving (Eq, Show)
+data GameState = AwaitingChaos (Maybe Counter) Board | AwaitingOrder Board deriving (Eq, Show)
 
 
 board :: GameState -> Board
 board (AwaitingChaos _ board) = board
 board (AwaitingOrder board) = board
-board (AwaitingRandom board) = board
 
 
 move :: GameState -> Move -> GameState
-move (AwaitingRandom  board) (Pick counter) = AwaitingChaos counter board
+move (AwaitingChaos _ board) (Pick counter) = AwaitingChaos (Just counter) board
 move (AwaitingChaos _ board) (Place counter pos) = AwaitingOrder $ board // [(pos, counter)]
-move (AwaitingOrder board) (Move src dst) = AwaitingRandom $ board // [(src, 0), (dst, board ! src)]
+move (AwaitingOrder board) (Move src dst) = AwaitingChaos Nothing $ board // [(src, 0), (dst, board ! src)]
 move state action = error.unlines $ ["Illegal action for given game state: " ++ show action, prettyPrint . board $ state]
 
 
@@ -110,13 +109,11 @@ skipMove board = Move occupiedSquare occupiedSquare
     occupiedSquare = head . occupiedSquares $ board
 
 moves :: GameState -> [Move]
-moves (AwaitingChaos counter board) = map (Place counter) $ emptySquares board
+moves (AwaitingChaos (Just counter) board) = map (Place counter) $ emptySquares board
 -- Lets only consider the two most likely colors, as we minimize the score anyway and it should be sufficient to block most moves
-moves (AwaitingRandom board) = concat [moves $ AwaitingChaos counter board | counter <- take 2 . sortOn (Down . (`remainingCounters` board)) $ [1 .. 7], remainingCounters counter board > 0]
+moves (AwaitingChaos Nothing board) = concat [moves $ AwaitingChaos (Just counter) board | counter <- take 2 . sortOn (Down . (`remainingCounters` board)) $ [1 .. 7], remainingCounters counter board > 0]
 --moves (AwaitingChaos Nothing board) = concat [moves $ AwaitingChaos (Just counter) board | counter <- [1 .. 7], remainingCounters counter board > 0]
 moves (AwaitingOrder board) = skipMove board : [Move src dst | src <- indices board, dst <- validMoves src board]
-
-
 -- Heuristic --
 
 -- instance Ord GameState where
@@ -147,8 +144,20 @@ patternScore xs = sum $ map score $ filter isPalindrome (continuousSubSeqs xs)
         score [_, _, _, 0, _,  _, _] = (+1) . length . filter (/= 0) $ xs
         score xs = length . filter (/= 0) $ xs -- just count all the counters on the squares
 
+gameScore :: [Counter] -> Int
+gameScore xs = sum $ map score $ filter isPalindrome (continuousSubSeqs xs)
+  where score [_] = 0 -- single counters do not give any score
+        score (0:xs) = 0 -- ignore palindromes which start and end with empty squares
+        score xs = length . filter (/= 0) $ xs -- just count all the counters on the squares
+
+
+
+
 rows :: Board -> [[Counter]]
 rows board = [[board ! (r, c) | c <- ['a' .. 'g']] | r <- ['A' .. 'G']]
+
+cols :: Board -> [[Counter]]
+cols board = [[board ! (r, c) | r <- ['A' .. 'G']] | c <- ['a' .. 'g']]
 
 rowHeuristic :: Char -> Board -> Int
 rowHeuristic r board = (patternCache !) . patternToInt $ [board ! (r, c) | c <- ['a' .. 'g']]
@@ -160,6 +169,9 @@ heuristic :: Board -> HeuristicScore
 heuristic board = (array ('A','G') rows, array ('a','h') cols)
   where rows = [ (r, rowHeuristic r board) | r <- ['A' .. 'G'] ]
         cols = [ (c, colHeuristic c board) | c <- ['a' .. 'g'] ]
+
+orderPoints:: Board -> Int
+orderPoints board =  sum (map (\x -> gameScore x) (rows board)) + sum (map (\x -> gameScore x) (cols board))
 
 type HeuristicScore = (UArray Char Int, UArray Char Int)
 
@@ -202,7 +214,6 @@ entropyTree gs = (\(r,c) -> sum $ elems r ++ elems c) . snd <$> build f (gs, sco
 makeTurn :: GameState -> Move
 makeTurn gs@(AwaitingChaos _ _) = minimumMove $ limitDepth 3 $ entropyTree gs
 makeTurn gs@(AwaitingOrder _) = maximumMove $ limitDepth 3 $ entropyTree gs
-makeTurn gs@(AwaitingRandom _) = error "illegal state"
 
 
 -- All IO stuff --
