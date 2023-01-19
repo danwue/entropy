@@ -27,10 +27,13 @@ import qualified Network.Wai.Handler.Warp         as Warp
 import           Network.WebSockets
 #endif
 import           Control.Monad.IO.Class
-import Entropy (Counter, Board, board, Move (Pick), GameState (AwaitingChaos, AwaitingRandom), Square, handleInput, intsToSquare)
+import Entropy (Counter, Board, board, Move (Pick), GameState (AwaitingChaos, AwaitingRandom, AwaitingOrder), Square, handleInput, intsToSquare, makeTurn)
 import Styles (grid_spacing)
 import Foreign (moveBytes)
 import GHC.Generics (URec(UAddr))
+import Data.Bool (Bool (True))
+import Data.Sequence (Seq(Empty))
+import Control.Applicative (Applicative(pure))
 
 
 -- | Type synonym for an application model
@@ -38,6 +41,9 @@ import GHC.Generics (URec(UAddr))
 data Side = None | Order | Chaos deriving (Show, Eq)
 
 data Difficulty = Ez | Md | Hd | NoDiff  deriving (Show, Eq)
+
+
+data OrderCounter = Square (Char, Char) | Empty   deriving (Show, Eq)
 
 
 data GameProgress
@@ -52,13 +58,15 @@ data GameProgress
 data Action
   = AddOne
   | PlaceCounter Int Int
-  | SubtractOne
+  | GenerateCounter
   | Continue
+  | MakeAiTurn
   | NewGame
-  | TileClicked (Int, Int)
   | PickSide Side
   | NoOp
   | Print
+  | TakeCounter Int Int
+  | MoveCounter Square Int Int
   | SayHelloWorld
   deriving (Eq, Show)
 
@@ -76,6 +84,7 @@ type CounterCount = (Counter, Int)
 data GameInfo = GameInfo {
   side :: Side,
   gs :: GameState,
+  orderCounter ::  OrderCounter, 
   randomSeed :: Int,
   gameProgress :: GameProgress,
   score :: Int,
@@ -103,10 +112,11 @@ initialModel:: GameInfo
 initialModel = GameInfo{side = None,
  gs = AwaitingRandom $ listArray (('A', 'a'), ('G', 'g')) $ repeat 0,
  difficulty = NoDiff,
- randomSeed=30,
- gameProgress=Starting,
+ randomSeed = 30,
+ orderCounter = Main.Empty,
+ gameProgress = Starting,
  score=0
- }
+}
 
 counter:: GameState -> Maybe Counter
 counter  (AwaitingChaos counter board)=  Just counter
@@ -116,6 +126,7 @@ getBoard:: GameInfo -> Board
 getBoard  GameInfo{gs=gs} = Entropy.board(gs)
 
 
+
 getRandomSeed:: GameInfo -> Int
 getRandomSeed GameInfo{randomSeed=rs}= rs
 
@@ -123,10 +134,10 @@ getAllRemainingCounters :: Board -> [ CounterCount]
 getAllRemainingCounters board =  Prelude.map (\el ->  (el , remainingCounters el board)) [1 .. 7]
 
 
-generateCounter :: GameInfo -> (GameInfo, Counter)
-generateCounter state =
+generateCounter :: GameInfo -> GameInfo
+generateCounter state@GameInfo{..} =
     let (el, seed) = giveRandomElement (Prelude.concat lists) (getRandomSeed state)
-        in  (state{randomSeed= seed}, el)
+        in  state{randomSeed= seed, gs= move gs (Pick el)}
     where
        lists = Prelude.map(\pair -> Prelude.replicate (snd pair) (fst pair)) (getAllRemainingCounters $ getBoard state)
 
@@ -143,19 +154,43 @@ giveRandomElement ls gen =  (el, nseed) where
 -- | Updates model, optionally introduces side effects
 
 updateModel :: Action -> GameInfo-> Effect Action GameInfo
-updateModel (PickSide Chaos) state@GameInfo{..} = let (new, ctr) = generateCounter state in  new{side = Order, gameProgress=InProgress, gs = AwaitingChaos  ctr (board gs)} <# do liftIO (print new) >> pure NoOp
-updateModel (PickSide Order) state@GameInfo{..} = let (new, ctr) = generateCounter state in  new{side = Order, gameProgress=InProgress, gs = AwaitingChaos  ctr (board gs)} <# do liftIO (print new) >> pure NoOp
+updateModel (PickSide Chaos) state@GameInfo{..} = generateCounter state{side=Chaos, gameProgress=InProgress} <# do liftIO (print state) >> pure NoOp
+updateModel (PickSide Order) state = let new@GameInfo{..} = generateCounter state in noEff $ new{gs= makeAiTurn gs, side = Order, gameProgress=InProgress}
 updateModel SayHelloWorld m = m <# do
   liftIO (print m) >> pure NoOp
+updateModel (TakeCounter a b) state@GameInfo{..} = 
+  case gs of 
+    (AwaitingOrder board) -> noEff state{orderCounter = Square (intsToSquare (a,b))}
+    _ -> noEff state
+
 updateModel (PlaceCounter a b) state@GameInfo{..} =  
   case gs of
-    (AwaitingRandom _)  -> noEff state
-    (AwaitingChaos counter board) -> noEff state{gs= AwaitingOrder $ board // [(intsToSquare (a, b), counter)]}
-    (AwaitingOrder _) -> let (new, ctr) = generateCounter state in  new{side = Order, gameProgress=InProgress, gs = AwaitingChaos  ctr (board gs)} <# do liftIO (print new) >> pure NoOp
-updateModel _ m =  noEff m
+    (AwaitingChaos counter board) ->  if isLegalMove gs (Place counter (intsToSquare (a, b))) 
+      then 
+         state { gs = move gs (Place counter (intsToSquare(a,b))), orderCounter=Main.Empty }<# do liftIO (print state) >> pure MakeAiTurn  
+      else state <# do liftIO (print state) >> pure NoOp
+    _ -> noEff state 
+
+updateModel MakeAiTurn state@GameInfo{..} = 
+  case gs of
+    (AwaitingRandom _) -> generateCounter state <# do liftIO (print state) >> pure MakeAiTurn   
+    (AwaitingChaos counter board) -> state{gs= makeAiTurn gs} <# do liftIO (print state) >> pure NoOp   
+    (AwaitingOrder  board) -> state{gs= makeAiTurn gs} <# do liftIO (print state) >> pure NoOp   
+
+updateModel (Main.MoveCounter src a b) state@GameInfo{..} =  
+  case gs of
+    (AwaitingOrder board) ->  if isLegalMove gs (Move src (intsToSquare (a, b))) then noEff state{ gs= move gs (Move src (intsToSquare (a, b))), orderCounter=Main.Empty} else noEff state
+    _ -> noEff state 
+    
+updateModel GenerateCounter state@GameInfo{..}= let new = generateCounter state in  noEff new
+updateModel _ state = noEff state
 
 
+makeAiTurn :: GameState -> GameState
+makeAiTurn gs =  move gs (makeTurn gs)
 
+isLegalMove :: GameState -> Move -> Bool
+isLegalMove _ _= True
 
 -- | Constructs a virtual DOM from a model
 viewModel :: GameInfo -> View Action
@@ -163,29 +198,11 @@ viewModel model =  div_
     [class_ "container"]
     [ displayHeading model,  displayGame model]
 
-
-gridRow :: View Action
-gridRow = div_ [class_ "grid-row"] (replicate 7 gridCell)
-  where
-    gridCell = div_[
-      style_ $ "width" =: S.ms(show tile_size ++"px") <>
-              "height" =: S.ms(show tile_size ++"px") <>
-              "float" =: "left"<>
-              "border-style" =:"solid"
-      ][]
-
-displayContainer :: View Action
-displayContainer =
-  div_
-    [style_ $ "position" =: "absolute" <> "z-index" =: "1"]
-    (replicate 7 gridRow)
-
 displayGame :: GameInfo -> View Action
 displayGame model@GameInfo {..}  =
   div_
     [style_ $ "position" =: "relative" <> "padding" =: S.ms(show grid_spacing ++"px")]
-    [displayContainer
-    , displayTileContainer  model
+    [ displayTileContainer  model
     ]
 
 
@@ -199,7 +216,13 @@ displayTileContainer model@GameInfo{..} =
               "flex-wrap" =: "wrap"
 
     ]
-    (concatMap (displayTile side)  (tilesWithCoordinates (board gs)))
+    (concatMap (displayTile side orderCounter)  (tilesWithCoordinates seen_board)) 
+    where 
+      seen_board = case orderCounter of
+        Main.Empty -> board gs
+        Square src ->  board gs // [(src,0)]
+
+    
 
 
 color :: Counter -> S.MisoString
@@ -212,32 +235,42 @@ color 6 =  "#00ff00"
 color 7 =  "#000000"
 color _ ="#ffffff"
 
-displayTile :: Side -> (Counter, Int, Int) -> [View Action]
-displayTile side (tile, a,b) =
+
+radius :: Counter -> S.MisoString
+radius 0 = "0%"
+radius _ ="50%"
+
+
+displayTile :: Side -> OrderCounter -> (Counter, Int, Int) -> [View Action]
+displayTile side oc (tile, a,b) =
   [ div_
       [style_ $
           "width"=: S.ms(show tile_size ++"px")<>
           "height"=:S.ms(show tile_size ++"px")<>
           "line-height"=: S.ms(show tile_size ++"px")<>
-          "margin-left"=:"10px"<>
-          "margin-top"=:"5px"
+          "border-style" =:"solid"
       ] button
   ] where 
 
-    action = PlaceCounter
+
+    action = case (side, oc) of
+      (Chaos, _)-> PlaceCounter a b
+      (Order, Square sq) -> Main.MoveCounter sq a b 
+      (Order, Main.Empty) -> TakeCounter a b 
+      (_, _ ) -> NoOp
+  
+
     button = [button_ 
                 [
                   style_ $
                     "width"=: S.ms(show tile_size ++"px")<>
                     "height"=:S.ms(show tile_size ++"px")<>
-                    "border-radius" =: "50%"<>
+                    "border-radius" =: radius tile<>
                     "line-height"=: S.ms(show tile_size ++"px")<>
-                    "margin-left"=: S.ms (show "10px")<>
-                    "margin-top"=:S.ms ( show "5px")<>
                     "background-color"=: color tile,
-                    onClick $ PlaceCounter a b
+                    onClick $ action
                 ]
-                [text  (S.ms $ show tile)]
+                (if tile>0 then [text  (S.ms $ show tile)] else [text "x"])
       ]
     
 
